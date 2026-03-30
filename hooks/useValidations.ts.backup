@@ -1,0 +1,239 @@
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { supabase } from '@/integrations/supabase/client';
+import { Validation, ValidationWithStartup } from '@/types/database';
+import { useAuth } from '@/contexts/AuthContext';
+import { toast } from 'sonner';
+
+export function useMyValidations() {
+  const { user } = useAuth();
+  
+  return useQuery({
+    queryKey: ['my-validations', user?.id],
+    queryFn: async () => {
+      if (!user) return [];
+      
+      const { data, error } = await supabase
+        .from('validations')
+        .select(`
+          *,
+          startup:startups(*)
+        `)
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      return data as unknown as ValidationWithStartup[];
+    },
+    enabled: !!user
+  });
+}
+
+export function useStartupValidations(startupId: string) {
+  return useQuery({
+    queryKey: ['startup-validations', startupId],
+    queryFn: async () => {
+      if (!startupId) return [];
+      
+      const { data, error } = await supabase
+        .from('validations')
+        .select(`
+          *,
+          profile:profiles!validations_user_id_fkey(*)
+        `)
+        .eq('startup_id', startupId)
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      return data as unknown as (Validation & { profile: any })[];
+    },
+    enabled: !!startupId
+  });
+}
+
+export function useTotalValidationCount() {
+  const { user } = useAuth();
+  
+  return useQuery({
+    queryKey: ['total-validation-count', user?.id],
+    queryFn: async () => {
+      if (!user) return 0;
+      
+      console.log('useTotalValidationCount: Fetching total validations for user:', user.id);
+      
+      const { data, error } = await supabase
+        .from('validations')
+        .select('id')
+        .eq('user_id', user.id);
+      
+      if (error) {
+        console.error('useTotalValidationCount: Error fetching validations:', error);
+        throw error;
+      }
+      
+      const count = data?.length || 0;
+      console.log('useTotalValidationCount: Found total validations:', count);
+      
+      return count;
+    },
+    enabled: !!user
+  });
+}
+
+export function useApprovedValidationCount() {
+  const { user } = useAuth();
+  
+  return useQuery({
+    queryKey: ['approved-validation-count', user?.id],
+    queryFn: async () => {
+      if (!user) return 0;
+      
+      console.log('useApprovedValidationCount: Fetching approved validations for user:', user.id);
+      
+      const { data, error } = await supabase
+        .from('validations')
+        .select('id')
+        .eq('user_id', user.id)
+        .or('ai_status.eq.approved,admin_status.eq.approved');
+      
+      if (error) {
+        console.error('useApprovedValidationCount: Error fetching validations:', error);
+        throw error;
+      }
+      
+      const count = data?.length || 0;
+      console.log('useApprovedValidationCount: Found approved validations:', count);
+      
+      return count;
+    },
+    enabled: !!user
+  });
+}
+
+export function useDeleteAllMyValidations() {
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  
+  return useMutation({
+    mutationFn: async () => {
+      if (!user) throw new Error('Not authenticated');
+      
+      console.log('useDeleteAllMyValidations: Deleting all validations for user:', user.id);
+      
+      const { error } = await supabase
+        .from('validations')
+        .delete()
+        .eq('user_id', user.id);
+      
+      if (error) {
+        console.error('useDeleteAllMyValidations: Error deleting validations:', error);
+        throw error;
+      }
+      
+      console.log('useDeleteAllMyValidations: Successfully deleted all validations');
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['my-validations'] });
+      queryClient.invalidateQueries({ queryKey: ['approved-validation-count'] });
+      queryClient.invalidateQueries({ queryKey: ['total-validation-count'] });
+      queryClient.invalidateQueries({ queryKey: ['startups-to-validate'] });
+      toast.success('Previous validations cleared. Ready to revalidate!');
+    },
+    onError: (error) => {
+      console.error('useDeleteAllMyValidations: Mutation error:', error);
+      toast.error('Failed to clear validations: ' + error.message);
+    }
+  });
+}
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  
+  return useMutation({
+    mutationFn: async ({ startupId, content, startupName }: { startupId: string; content: string; startupName?: string }) => {
+      if (!user) throw new Error('Not authenticated');
+      
+      // Create the validation
+      const { data, error } = await supabase
+        .from('validations')
+        .insert({
+          startup_id: startupId,
+          user_id: user.id,
+          content,
+          ai_status: 'pending'
+        })
+        .select()
+        .single();
+      
+      if (error) throw error;
+      
+      const validation = data as Validation;
+      
+      // Call AI moderation (fire and forget - don't block the UI)
+      supabase.functions.invoke('moderate-validation', {
+        body: {
+          validationId: validation.id,
+          content: validation.content,
+          startupName: startupName || 'Unknown'
+        }
+      }).then(({ data, error }) => {
+        if (error) {
+          console.error('Moderation failed:', error);
+        } else {
+          // Refresh queries after moderation completes
+          queryClient.invalidateQueries({ queryKey: ['my-validations'] });
+          queryClient.invalidateQueries({ queryKey: ['approved-validation-count'] });
+          queryClient.invalidateQueries({ queryKey: ['total-validation-count'] });
+        }
+      }).catch(err => {
+        console.error('Moderation error:', err);
+      });
+      
+      return validation;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['my-validations'] });
+      queryClient.invalidateQueries({ queryKey: ['approved-validation-count'] });
+      queryClient.invalidateQueries({ queryKey: ['total-validation-count'] });
+      queryClient.invalidateQueries({ queryKey: ['startups-to-validate'] });
+      toast.success('Validation submitted! It will be reviewed shortly.');
+    },
+    onError: (error) => {
+      toast.error('Failed to submit validation: ' + error.message);
+    }
+  });
+}
+
+export function useDeleteAllMyValidations() {
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  
+  return useMutation({
+    mutationFn: async () => {
+      if (!user) throw new Error('Not authenticated');
+      
+      console.log('useDeleteAllMyValidations: Deleting all validations for user:', user.id);
+      
+      const { error } = await supabase
+        .from('validations')
+        .delete()
+        .eq('user_id', user.id);
+      
+      if (error) {
+        console.error('useDeleteAllMyValidations: Error deleting validations:', error);
+        throw error;
+      }
+      
+      console.log('useDeleteAllMyValidations: Successfully deleted all validations');
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['my-validations'] });
+      queryClient.invalidateQueries({ queryKey: ['approved-validation-count'] });
+      queryClient.invalidateQueries({ queryKey: ['total-validation-count'] });
+      queryClient.invalidateQueries({ queryKey: ['startups-to-validate'] });
+      toast.success('Previous validations cleared. Ready to revalidate!');
+    },
+    onError: (error) => {
+      console.error('useDeleteAllMyValidations: Mutation error:', error);
+      toast.error('Failed to clear validations: ' + error.message);
+    }
+  });
+}
