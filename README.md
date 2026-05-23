@@ -8,6 +8,12 @@ Instead of allowing any startup to go live instantly, StartupValidator uses a **
 
 ---
 
+
+https://github.com/user-attachments/assets/bac5e8c5-bfb2-4556-af49-c91d5cde09a7
+
+
+
+
 ## 🚀 The Startup Validation Flow
 
 Every startup on StartupValidator goes through the following mandatory steps before becoming public.
